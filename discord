@@ -1,0 +1,645 @@
+// Au tout début de votre fichier index.js
+require('dotenv').config();
+
+// Remplacez vos configs par :
+const config = {
+    token: process.env.DISCORD_TOKEN,
+    clientId: process.env.DISCORD_CLIENT_ID,
+    prefix: process.env.PREFIX || '!',
+    // ... autres configs
+};
+
+// Vérification de sécurité
+if (!config.token || !config.clientId) {
+    console.error('❌ TOKEN ou CLIENT_ID manquant dans le fichier Token.env');
+    process.exit(1);
+}
+
+// Votre code de bot normal...
+client.login(config.token);
+
+// Base de données JSON simple
+const dbPath = './data';
+if (!fs.existsSync(dbPath)) fs.mkdirSync(dbPath);
+
+class Database {
+    constructor(name) {
+        this.path = path.join(dbPath, `${name}.json`);
+        this.data = this.load();
+    }
+
+    load() {
+        try {
+            return JSON.parse(fs.readFileSync(this.path, 'utf8'));
+        } catch {
+            return {};
+        }
+    }
+
+    save() {
+        fs.writeFileSync(this.path, JSON.stringify(this.data, null, 2));
+    }
+
+    get(key) {
+        return this.data[key];
+    }
+
+    set(key, value) {
+        this.data[key] = value;
+        this.save();
+    }
+
+    delete(key) {
+        delete this.data[key];
+        this.save();
+    }
+}
+
+// Initialisation des bases de données
+const guildsDB = new Database('guilds');
+const usersDB = new Database('users');
+const botsDB = new Database('bots');
+const rolesDB = new Database('roles');
+const warningsDB = new Database('warnings');
+
+// Client Discord
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildModeration,
+        GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildMessageReactions
+    ]
+});
+
+// Utilitaires
+class Utils {
+    static hasPermission(member, permissions) {
+        if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
+        return member.roles.cache.some(role => config.adminRoles.includes(role.name));
+    }
+
+    static createEmbed(title, description, color = 0x3498db) {
+        return new EmbedBuilder()
+            .setTitle(title)
+            .setDescription(description)
+            .setColor(color)
+            .setTimestamp();
+    }
+
+    static async log(guild, message, type = 'info') {
+        const logChannel = guild.channels.cache.find(ch => ch.name === config.logChannel);
+        if (!logChannel) return;
+
+        const colors = {
+            info: 0x3498db,
+            warning: 0xf39c12,
+            error: 0xe74c3c,
+            success: 0x2ecc71
+        };
+
+        const embed = new EmbedBuilder()
+            .setTitle(`📋 Log - ${type.toUpperCase()}`)
+            .setDescription(message)
+            .setColor(colors[type] || colors.info)
+            .setTimestamp();
+
+        logChannel.send({ embeds: [embed] });
+    }
+}
+
+// Gestionnaire de commandes slash
+const commands = [
+    // Commandes d'administration
+    new SlashCommandBuilder()
+        .setName('ban')
+        .setDescription('Bannir un utilisateur')
+        .addUserOption(option => option.setName('utilisateur').setDescription('Utilisateur à bannir').setRequired(true))
+        .addStringOption(option => option.setName('raison').setDescription('Raison du bannissement')),
+
+    new SlashCommandBuilder()
+        .setName('kick')
+        .setDescription('Expulser un utilisateur')
+        .addUserOption(option => option.setName('utilisateur').setDescription('Utilisateur à expulser').setRequired(true))
+        .addStringOption(option => option.setName('raison').setDescription('Raison de l\'expulsion')),
+
+    new SlashCommandBuilder()
+        .setName('warn')
+        .setDescription('Avertir un utilisateur')
+        .addUserOption(option => option.setName('utilisateur').setDescription('Utilisateur à avertir').setRequired(true))
+        .addStringOption(option => option.setName('raison').setDescription('Raison de l\'avertissement').setRequired(true)),
+
+    new SlashCommandBuilder()
+        .setName('mute')
+        .setDescription('Rendre muet un utilisateur')
+        .addUserOption(option => option.setName('utilisateur').setDescription('Utilisateur à rendre muet').setRequired(true))
+        .addIntegerOption(option => option.setName('durée').setDescription('Durée en minutes')),
+
+    // Gestion des rôles
+    new SlashCommandBuilder()
+        .setName('role-add')
+        .setDescription('Ajouter un rôle à un utilisateur')
+        .addUserOption(option => option.setName('utilisateur').setDescription('Utilisateur').setRequired(true))
+        .addRoleOption(option => option.setName('rôle').setDescription('Rôle à ajouter').setRequired(true)),
+
+    new SlashCommandBuilder()
+        .setName('role-remove')
+        .setDescription('Retirer un rôle à un utilisateur')
+        .addUserOption(option => option.setName('utilisateur').setDescription('Utilisateur').setRequired(true))
+        .addRoleOption(option => option.setName('rôle').setDescription('Rôle à retirer').setRequired(true)),
+
+    new SlashCommandBuilder()
+        .setName('role-create')
+        .setDescription('Créer un nouveau rôle')
+        .addStringOption(option => option.setName('nom').setDescription('Nom du rôle').setRequired(true))
+        .addStringOption(option => option.setName('couleur').setDescription('Couleur hex du rôle')),
+
+    // Gestion des bots
+    new SlashCommandBuilder()
+        .setName('bot-add')
+        .setDescription('Ajouter un bot à la liste')
+        .addStringOption(option => option.setName('nom').setDescription('Nom du bot').setRequired(true))
+        .addStringOption(option => option.setName('id').setDescription('ID du bot').setRequired(true))
+        .addStringOption(option => option.setName('description').setDescription('Description du bot')),
+
+    new SlashCommandBuilder()
+        .setName('bot-list')
+        .setDescription('Lister tous les bots enregistrés'),
+
+    new SlashCommandBuilder()
+        .setName('bot-remove')
+        .setDescription('Retirer un bot de la liste')
+        .addStringOption(option => option.setName('id').setDescription('ID du bot').setRequired(true)),
+
+    // Commandes système
+    new SlashCommandBuilder()
+        .setName('setup')
+        .setDescription('Configuration initiale du serveur'),
+
+    new SlashCommandBuilder()
+        .setName('stats')
+        .setDescription('Statistiques du serveur'),
+
+    new SlashCommandBuilder()
+        .setName('backup')
+        .setDescription('Créer une sauvegarde du serveur'),
+
+    new SlashCommandBuilder()
+        .setName('clear')
+        .setDescription('Supprimer des messages')
+        .addIntegerOption(option => option.setName('nombre').setDescription('Nombre de messages à supprimer').setRequired(true))
+];
+
+// Événements du bot
+client.once('ready', async () => {
+    console.log(`🤖 ${client.user.tag} est en ligne !`);
+    
+    // Enregistrement des commandes slash
+    const rest = new REST({ version: '10' }).setToken(config.token);
+    try {
+        await rest.put(Routes.applicationCommands(config.clientId), {
+            body: commands.map(cmd => cmd.toJSON())
+        });
+        console.log('✅ Commandes slash enregistrées');
+    } catch (error) {
+        console.error('❌ Erreur lors de l\'enregistrement des commandes:', error);
+    }
+
+    client.user.setActivity('Gestion du serveur', { type: 'WATCHING' });
+});
+
+// Gestion des nouvelles guildes
+client.on('guildCreate', async (guild) => {
+    const guildData = {
+        id: guild.id,
+        name: guild.name,
+        joinedAt: new Date(),
+        settings: {
+            prefix: config.prefix,
+            logChannel: null,
+            welcomeChannel: null,
+            autoRole: null,
+            moderationEnabled: true
+        },
+        bots: {},
+        warnings: {}
+    };
+    
+    guildsDB.set(guild.id, guildData);
+    console.log(`✅ Rejoint le serveur: ${guild.name}`);
+});
+
+// Gestion des nouveaux membres
+client.on('guildMemberAdd', async (member) => {
+    const guildData = guildsDB.get(member.guild.id);
+    if (!guildData) return;
+
+    const welcomeChannel = member.guild.channels.cache.find(ch => ch.name === config.welcomeChannel);
+    if (welcomeChannel) {
+        const embed = Utils.createEmbed(
+            '👋 Bienvenue !',
+            `Salut ${member.user}, bienvenue sur **${member.guild.name}** !\n\nTu es notre ${member.guild.memberCount}ème membre.`,
+            0x2ecc71
+        );
+        welcomeChannel.send({ embeds: [embed] });
+    }
+
+    // Auto-rôle si configuré
+    if (guildData.settings.autoRole) {
+        const role = member.guild.roles.cache.get(guildData.settings.autoRole);
+        if (role) {
+            member.roles.add(role);
+        }
+    }
+});
+
+// Gestion des commandes slash
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isCommand()) return;
+
+    const { commandName, options, member, guild } = interaction;
+
+    // Vérification des permissions
+    if (!Utils.hasPermission(member, PermissionFlagsBits.Administrator)) {
+        return interaction.reply({ content: '❌ Vous n\'avez pas les permissions nécessaires.', ephemeral: true });
+    }
+
+    try {
+        switch (commandName) {
+            case 'ban':
+                await handleBan(interaction);
+                break;
+            case 'kick':
+                await handleKick(interaction);
+                break;
+            case 'warn':
+                await handleWarn(interaction);
+                break;
+            case 'mute':
+                await handleMute(interaction);
+                break;
+            case 'role-add':
+                await handleRoleAdd(interaction);
+                break;
+            case 'role-remove':
+                await handleRoleRemove(interaction);
+                break;
+            case 'role-create':
+                await handleRoleCreate(interaction);
+                break;
+            case 'bot-add':
+                await handleBotAdd(interaction);
+                break;
+            case 'bot-list':
+                await handleBotList(interaction);
+                break;
+            case 'bot-remove':
+                await handleBotRemove(interaction);
+                break;
+            case 'setup':
+                await handleSetup(interaction);
+                break;
+            case 'stats':
+                await handleStats(interaction);
+                break;
+            case 'clear':
+                await handleClear(interaction);
+                break;
+            case 'backup':
+                await handleBackup(interaction);
+                break;
+        }
+    } catch (error) {
+        console.error('Erreur dans la commande:', error);
+        interaction.reply({ content: '❌ Une erreur est survenue.', ephemeral: true });
+    }
+});
+
+// Handlers des commandes
+async function handleBan(interaction) {
+    const user = interaction.options.getUser('utilisateur');
+    const reason = interaction.options.getString('raison') || 'Aucune raison spécifiée';
+
+    if (!interaction.guild.members.me.permissions.has(PermissionFlagsBits.BanMembers)) {
+        return interaction.reply({ content: '❌ Je n\'ai pas la permission de bannir.', ephemeral: true });
+    }
+
+    try {
+        await interaction.guild.members.ban(user, { reason });
+        const embed = Utils.createEmbed('🔨 Utilisateur banni', `${user.tag} a été banni.\nRaison: ${reason}`, 0xe74c3c);
+        interaction.reply({ embeds: [embed] });
+        Utils.log(interaction.guild, `${user.tag} banni par ${interaction.user.tag}. Raison: ${reason}`, 'warning');
+    } catch (error) {
+        interaction.reply({ content: '❌ Impossible de bannir cet utilisateur.', ephemeral: true });
+    }
+}
+
+async function handleKick(interaction) {
+    const user = interaction.options.getUser('utilisateur');
+    const reason = interaction.options.getString('raison') || 'Aucune raison spécifiée';
+    const member = interaction.guild.members.cache.get(user.id);
+
+    if (!member) {
+        return interaction.reply({ content: '❌ Utilisateur non trouvé.', ephemeral: true });
+    }
+
+    try {
+        await member.kick(reason);
+        const embed = Utils.createEmbed('👢 Utilisateur expulsé', `${user.tag} a été expulsé.\nRaison: ${reason}`, 0xf39c12);
+        interaction.reply({ embeds: [embed] });
+        Utils.log(interaction.guild, `${user.tag} expulsé par ${interaction.user.tag}. Raison: ${reason}`, 'warning');
+    } catch (error) {
+        interaction.reply({ content: '❌ Impossible d\'expulser cet utilisateur.', ephemeral: true });
+    }
+}
+
+async function handleWarn(interaction) {
+    const user = interaction.options.getUser('utilisateur');
+    const reason = interaction.options.getString('raison');
+
+    const warnings = warningsDB.get(user.id) || [];
+    warnings.push({
+        reason,
+        moderator: interaction.user.id,
+        date: new Date(),
+        guildId: interaction.guild.id
+    });
+    warningsDB.set(user.id, warnings);
+
+    const embed = Utils.createEmbed('⚠️ Avertissement donné', `${user.tag} a reçu un avertissement.\nRaison: ${reason}\nTotal: ${warnings.length} avertissement(s)`, 0xf39c12);
+    interaction.reply({ embeds: [embed] });
+    Utils.log(interaction.guild, `${user.tag} averti par ${interaction.user.tag}. Raison: ${reason}`, 'warning');
+}
+
+async function handleMute(interaction) {
+    const user = interaction.options.getUser('utilisateur');
+    const duration = interaction.options.getInteger('durée') || 10;
+    const member = interaction.guild.members.cache.get(user.id);
+
+    if (!member) {
+        return interaction.reply({ content: '❌ Utilisateur non trouvé.', ephemeral: true });
+    }
+
+    try {
+        await member.timeout(duration * 60 * 1000, 'Mute via bot');
+        const embed = Utils.createEmbed('🔇 Utilisateur rendu muet', `${user.tag} a été rendu muet pour ${duration} minute(s).`, 0xf39c12);
+        interaction.reply({ embeds: [embed] });
+        Utils.log(interaction.guild, `${user.tag} rendu muet par ${interaction.user.tag} pour ${duration}min`, 'warning');
+    } catch (error) {
+        interaction.reply({ content: '❌ Impossible de rendre muet cet utilisateur.', ephemeral: true });
+    }
+}
+
+async function handleRoleAdd(interaction) {
+    const user = interaction.options.getUser('utilisateur');
+    const role = interaction.options.getRole('rôle');
+    const member = interaction.guild.members.cache.get(user.id);
+
+    if (!member) {
+        return interaction.reply({ content: '❌ Utilisateur non trouvé.', ephemeral: true });
+    }
+
+    try {
+        await member.roles.add(role);
+        const embed = Utils.createEmbed('✅ Rôle ajouté', `Le rôle ${role.name} a été ajouté à ${user.tag}.`, 0x2ecc71);
+        interaction.reply({ embeds: [embed] });
+        Utils.log(interaction.guild, `Rôle ${role.name} ajouté à ${user.tag} par ${interaction.user.tag}`, 'info');
+    } catch (error) {
+        interaction.reply({ content: '❌ Impossible d\'ajouter le rôle.', ephemeral: true });
+    }
+}
+
+async function handleRoleRemove(interaction) {
+    const user = interaction.options.getUser('utilisateur');
+    const role = interaction.options.getRole('rôle');
+    const member = interaction.guild.members.cache.get(user.id);
+
+    if (!member) {
+        return interaction.reply({ content: '❌ Utilisateur non trouvé.', ephemeral: true });
+    }
+
+    try {
+        await member.roles.remove(role);
+        const embed = Utils.createEmbed('✅ Rôle retiré', `Le rôle ${role.name} a été retiré de ${user.tag}.`, 0x2ecc71);
+        interaction.reply({ embeds: [embed] });
+        Utils.log(interaction.guild, `Rôle ${role.name} retiré de ${user.tag} par ${interaction.user.tag}`, 'info');
+    } catch (error) {
+        interaction.reply({ content: '❌ Impossible de retirer le rôle.', ephemeral: true });
+    }
+}
+
+async function handleRoleCreate(interaction) {
+    const name = interaction.options.getString('nom');
+    const color = interaction.options.getString('couleur') || '#99aab5';
+
+    try {
+        const role = await interaction.guild.roles.create({
+            name: name,
+            color: color,
+            reason: `Rôle créé par ${interaction.user.tag}`
+        });
+
+        const embed = Utils.createEmbed('✅ Rôle créé', `Le rôle ${role.name} a été créé avec succès.`, 0x2ecc71);
+        interaction.reply({ embeds: [embed] });
+        Utils.log(interaction.guild, `Rôle ${role.name} créé par ${interaction.user.tag}`, 'info');
+    } catch (error) {
+        interaction.reply({ content: '❌ Impossible de créer le rôle.', ephemeral: true });
+    }
+}
+
+async function handleBotAdd(interaction) {
+    const name = interaction.options.getString('nom');
+    const id = interaction.options.getString('id');
+    const description = interaction.options.getString('description') || 'Aucune description';
+
+    const guildBots = botsDB.get(interaction.guild.id) || {};
+    
+    if (Object.keys(guildBots).length >= config.maxBots) {
+        return interaction.reply({ content: `❌ Limite de ${config.maxBots} bots atteinte.`, ephemeral: true });
+    }
+
+    guildBots[id] = {
+        name,
+        description,
+        addedBy: interaction.user.id,
+        addedAt: new Date()
+    };
+
+    botsDB.set(interaction.guild.id, guildBots);
+
+    const embed = Utils.createEmbed('🤖 Bot ajouté', `**${name}** (${id}) a été ajouté à la liste des bots.\nDescription: ${description}`, 0x2ecc71);
+    interaction.reply({ embeds: [embed] });
+    Utils.log(interaction.guild, `Bot ${name} ajouté par ${interaction.user.tag}`, 'info');
+}
+
+async function handleBotList(interaction) {
+    const guildBots = botsDB.get(interaction.guild.id) || {};
+    const botList = Object.entries(guildBots);
+
+    if (botList.length === 0) {
+        return interaction.reply({ content: '❌ Aucun bot enregistré.', ephemeral: true });
+    }
+
+    const embed = Utils.createEmbed(`🤖 Liste des Bots (${botList.length}/${config.maxBots})`, '', 0x3498db);
+    
+    botList.slice(0, 25).forEach(([id, bot]) => {
+        embed.addFields({
+            name: `${bot.name} (${id})`,
+            value: bot.description,
+            inline: true
+        });
+    });
+
+    interaction.reply({ embeds: [embed] });
+}
+
+async function handleBotRemove(interaction) {
+    const id = interaction.options.getString('id');
+    const guildBots = botsDB.get(interaction.guild.id) || {};
+
+    if (!guildBots[id]) {
+        return interaction.reply({ content: '❌ Bot non trouvé.', ephemeral: true });
+    }
+
+    const botName = guildBots[id].name;
+    delete guildBots[id];
+    botsDB.set(interaction.guild.id, guildBots);
+
+    const embed = Utils.createEmbed('🗑️ Bot retiré', `**${botName}** a été retiré de la liste.`, 0xe74c3c);
+    interaction.reply({ embeds: [embed] });
+    Utils.log(interaction.guild, `Bot ${botName} retiré par ${interaction.user.tag}`, 'info');
+}
+
+async function handleSetup(interaction) {
+    const guild = interaction.guild;
+    
+    // Création des salons nécessaires
+    const channels = [
+        { name: 'logs', type: 0 },
+        { name: 'bienvenue', type: 0 },
+        { name: 'règles', type: 0 }
+    ];
+
+    const createdChannels = [];
+    for (const channelData of channels) {
+        const existing = guild.channels.cache.find(ch => ch.name === channelData.name);
+        if (!existing) {
+            const channel = await guild.channels.create({
+                name: channelData.name,
+                type: channelData.type
+            });
+            createdChannels.push(channel.name);
+        }
+    }
+
+    // Création des rôles de base
+    const roles = ['Modérateur', 'Helper', 'Membre Vérifié'];
+    const createdRoles = [];
+    for (const roleName of roles) {
+        const existing = guild.roles.cache.find(r => r.name === roleName);
+        if (!existing) {
+            await guild.roles.create({
+                name: roleName,
+                color: '#3498db',
+                reason: 'Setup automatique'
+            });
+            createdRoles.push(roleName);
+        }
+    }
+
+    const embed = Utils.createEmbed('⚙️ Configuration terminée', 
+        `Salons créés: ${createdChannels.join(', ') || 'Aucun'}\nRôles créés: ${createdRoles.join(', ') || 'Aucun'}`, 
+        0x2ecc71
+    );
+    interaction.reply({ embeds: [embed] });
+}
+
+async function handleStats(interaction) {
+    const guild = interaction.guild;
+    const guildBots = botsDB.get(guild.id) || {};
+    
+    const embed = Utils.createEmbed('📊 Statistiques du serveur', '', 0x3498db)
+        .addFields(
+            { name: '👥 Membres', value: guild.memberCount.toString(), inline: true },
+            { name: '📱 Salons', value: guild.channels.cache.size.toString(), inline: true },
+            { name: '🎭 Rôles', value: guild.roles.cache.size.toString(), inline: true },
+            { name: '🤖 Bots gérés', value: Object.keys(guildBots).length.toString(), inline: true },
+            { name: '📅 Créé le', value: guild.createdAt.toDateString(), inline: true },
+            { name: '👑 Propriétaire', value: `<@${guild.ownerId}>`, inline: true }
+        );
+    
+    interaction.reply({ embeds: [embed] });
+}
+
+async function handleClear(interaction) {
+    const amount = interaction.options.getInteger('nombre');
+    
+    if (amount < 1 || amount > 100) {
+        return interaction.reply({ content: '❌ Le nombre doit être entre 1 et 100.', ephemeral: true });
+    }
+
+    try {
+        const messages = await interaction.channel.bulkDelete(amount, true);
+        const embed = Utils.createEmbed('🧹 Messages supprimés', `${messages.size} message(s) supprimé(s).`, 0x2ecc71);
+        interaction.reply({ embeds: [embed], ephemeral: true });
+        Utils.log(interaction.guild, `${messages.size} messages supprimés par ${interaction.user.tag}`, 'info');
+    } catch (error) {
+        interaction.reply({ content: '❌ Impossible de supprimer les messages.', ephemeral: true });
+    }
+}
+
+async function handleBackup(interaction) {
+    const guild = interaction.guild;
+    
+    const backup = {
+        guild: {
+            id: guild.id,
+            name: guild.name,
+            description: guild.description,
+            icon: guild.iconURL(),
+            banner: guild.bannerURL()
+        },
+        channels: guild.channels.cache.map(ch => ({
+            id: ch.id,
+            name: ch.name,
+            type: ch.type,
+            position: ch.position,
+            parentId: ch.parentId
+        })),
+        roles: guild.roles.cache.map(role => ({
+            id: role.id,
+            name: role.name,
+            color: role.color,
+            permissions: role.permissions.toArray(),
+            position: role.position
+        })),
+        bots: botsDB.get(guild.id) || {},
+        createdAt: new Date()
+    };
+
+    const backupData = JSON.stringify(backup, null, 2);
+    const buffer = Buffer.from(backupData, 'utf8');
+    
+    const embed = Utils.createEmbed('💾 Sauvegarde créée', 'Sauvegarde du serveur générée avec succès.', 0x2ecc71);
+    
+    interaction.reply({
+        embeds: [embed],
+        files: [{
+            attachment: buffer,
+            name: `backup_${guild.name}_${Date.now()}.json`
+        }]
+    });
+}
+
+// Gestion des erreurs
+process.on('unhandledRejection', (reason, p) => {
+    console.log('Unhandled Rejection at: Promise', p, 'reason:', reason);
+});
+
+// Connexion du bot
+client.login(config.token).catch(console.error);
+
+module.exports = client;
